@@ -111,7 +111,7 @@ Android 수신 timeout은 10초이므로 시리얼 샘플을 먼저 확인하면
 
 ## 검증 현황
 
-펌웨어는 Arm GNU 15.2.1과 기존 Makefile로 컴파일·링크·ELF/BIN 생성을 확인했습니다. Qt 재빌드는 로컬 Charts 모듈 부재로 중단됐으며 Android APK 재빌드는 미검증입니다. 장치·UI 사진과 [시연 영상](../images/demo.mp4)은 제공하지만 정량 지연·전원 파형·가스 농도 정확도 측정 자료는 없습니다.
+펌웨어는 Arm GNU 15.2.1과 기존 Makefile로 컴파일·링크·ELF/BIN 생성을 확인했습니다. Qt 재빌드는 로컬 Charts 모듈 부재로 중단됐으며 Android APK 재빌드는 미검증입니다. 장치·UI 사진과 [시연 영상](assets/demo.mp4)은 제공하지만 정량 지연·전원 파형·가스 농도 정확도 측정 자료는 없습니다.
 
 ## 증상별 확인
 

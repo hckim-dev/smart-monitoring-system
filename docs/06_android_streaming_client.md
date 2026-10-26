@@ -30,8 +30,8 @@ IP·port, 연결·전송 상태, 카메라·플래시, 센서값·임계값을 `
 <table>
   <tr><th>카메라·연결</th><th>센서·제어</th></tr>
   <tr>
-    <td><img src="../images/android_app_camera.png" alt="카메라와 서버 연결 화면" width="220"></td>
-    <td><img src="../images/android_app_control.png" alt="센서값과 차단·복구 제어 화면" width="220"></td>
+    <td><img src="assets/android_app_camera.png" alt="카메라와 서버 연결 화면" width="220"></td>
+    <td><img src="assets/android_app_control.png" alt="센서값과 차단·복구 제어 화면" width="220"></td>
   </tr>
 </table>
 

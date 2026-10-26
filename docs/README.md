@@ -19,6 +19,6 @@
 
 ## 자료
 
-[장치 사진](../images/hardware_setup.png) · [서보 상태 비교](../images/valve_states.png) · [시연 영상](../images/demo.mp4) · [발표 PDF](smart_monitoring_system_presentation.pdf)
+[장치 사진](assets/hardware_setup.png) · [서보 상태 비교](assets/valve_states.png) · [시연 영상](assets/demo.mp4) · [발표 PDF](presentation/smart_monitoring_system_presentation.pdf)
 
 발표 PDF와 화면 캡처는 제작 당시 자료입니다. 현재 구현의 세부 동작과 버전은 기술 문서·소스를 참고합니다. 자격 증명과 서명 키 관리는 [Credential safety](credential-security.md)에 정리했습니다.

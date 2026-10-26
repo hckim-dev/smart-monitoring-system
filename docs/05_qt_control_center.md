@@ -18,7 +18,7 @@
 
 | 정상 입력 | 위험 입력 |
 | --- | --- |
-| ![정상 입력의 관제 화면](../images/qt_normal.png) | ![위험 입력의 관제 화면](../images/qt_danger.png) |
+| ![정상 입력의 관제 화면](assets/qt_normal.png) | ![위험 입력의 관제 화면](assets/qt_danger.png) |
 
 ## 이벤트 흐름
 

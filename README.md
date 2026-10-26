@@ -6,7 +6,7 @@
 
 **C99 / CMSIS · C++17 / Qt Widgets · Kotlin / Compose / CameraX · UART / TCP**
 
-[시연](#시연) · [설계와 구현](#설계와-구현) · [기술 문서](docs/README.md) · [실행 방법](docs/08_setup_and_operation_guide.md) · [발표 자료](docs/smart_monitoring_system_presentation.pdf)
+[시연](#시연) · [설계와 구현](#설계와-구현) · [기술 문서](docs/README.md) · [실행 방법](docs/08_setup_and_operation_guide.md) · [발표 자료](docs/presentation/smart_monitoring_system_presentation.pdf)
 
 ## 주요 기능
 
@@ -15,8 +15,8 @@
 - **영상·센서 통합 관제** — 스마트폰 카메라 영상, 센서 차트, 일별 CSV 기록을 제공합니다.
 
 <p>
-  <img src="images/qt_danger.png" alt="PC 관제: 현장 영상, 센서 차트, 자동 차단 로그" width="400">
-  <img src="images/android_app_control.png" alt="모바일 제어: 센서값과 밸브 차단·복구 버튼" width="210">
+  <img src="docs/assets/qt_danger.png" alt="PC 관제: 현장 영상, 센서 차트, 자동 차단 로그" width="400">
+  <img src="docs/assets/android_app_control.png" alt="모바일 제어: 센서값과 밸브 차단·복구 버튼" width="210">
 </p>
 
 ## 전체 구조
@@ -42,7 +42,7 @@ STM32가 200ms 간격으로 센서값을 보내고 **Qt가 자동 차단을 판�
 
 https://github.com/user-attachments/assets/efa6ab54-6c9d-45a7-a74a-6c195651bac4
 
-[영상 파일 직접 보기](images/demo.mp4)
+[영상 파일 직접 보기](docs/assets/demo.mp4)
 
 1. 가변저항으로 입력을 높여 **자동 차단과 팬·LED 연동**을 확인합니다.
 2. 입력을 낮춘 뒤 PC 또는 Android에서 **수동 복구**합니다.

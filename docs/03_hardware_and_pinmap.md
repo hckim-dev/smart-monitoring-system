@@ -6,7 +6,7 @@
 
 STM32F411RE Nucleo에 가변저항, 버튼 2개, LED 2개, 서보, 모터 드라이버와 DC 팬을 연결합니다. 가변저항은 가스 센서 입력을, 서보 혼의 0°/90° 회전은 밸브 개폐를 표현합니다.
 
-<img src="../images/hardware_setup.png" alt="Nucleo, 가변저항, 버튼, LED, 모터 드라이버, 팬과 서보를 연결한 장치" width="480">
+<img src="assets/hardware_setup.png" alt="Nucleo, 가변저항, 버튼, LED, 모터 드라이버, 팬과 서보를 연결한 장치" width="480">
 
 | 부품 | 역할 |
 | --- | --- |
@@ -40,7 +40,7 @@ STM32F411RE Nucleo에 가변저항, 버튼 2개, LED 2개, 서보, 모터 드라
 | 복구 `'0'` | 0° / 500µs | LOW / LOW | LOW / LOW |
 | 차단 `'1'` | 90° / 1500µs | HIGH / LOW | HIGH / HIGH |
 
-![서보의 개방·차단 목표 위치 비교](../images/valve_states.png)
+![서보의 개방·차단 목표 위치 비교](assets/valve_states.png)
 
 서보 펄스 폭은 타이머 설정에서 계산한 값입니다. 팬은 정회전·정지만 제어하며 IN1·IN2가 LOW일 때의 전기적 상태는 드라이버 enable 배선과 함께 확인합니다.
 
