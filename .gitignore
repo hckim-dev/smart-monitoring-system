@@ -94,3 +94,6 @@ GoogleService-Info.plist
 *.pfx
 *.pem
 *.key
+
+# Local work notes
+_handoff/

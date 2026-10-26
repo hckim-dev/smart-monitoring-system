@@ -1,234 +1,130 @@
-# 시스템 설치 및 운용 가이드 (Setup & Operation Guide v1.0)
+# 설치·운용
 
-본 문서는 **스마트 가스 모니터링 시스템**을 구성하는 3계층(STM32 베어메탈 펌웨어, Qt 데스크톱 관제 서버, Android 모바일 클라이언트)의 개발 환경 구축, 필수 의존성 패키지 설치, 소스 코드 빌드 및 플래싱, 네트워크 구성, 그리고 실제 운용 및 테스트 절차를 정의합니다.
+[문서 안내](README.md) · [하드웨어](03_hardware_and_pinmap.md) · [프로토콜](02_protocol_specification.md)
 
----
+## 준비 환경
 
-## 📋 목차
+| 구성 | 환경·도구 |
+| --- | --- |
+| STM32 | Arm GNU Toolchain 15.2.1, GNU Make 호환 도구, STM32CubeProgrammer |
+| Qt | C++17 compiler, qmake, Widgets·Network·SerialPort·Charts |
+| Android | Gradle 9.5.0, AGP 9.3.1, SDK 37, daemon JDK 25 |
+| 장치·연결 | STM32F411RE 시연 장치, Android API 26 이상 카메라 기기, USB VCP·TCP 네트워크 |
 
-1. 개발 및 실행 환경 요구사항 (Prerequisites)
-2. 계층별 빌드 및 배포 절차 (MSYS2 패키지 설치 포함)
-3. 네트워크 환경 구성 (Local Hotspot / Tailscale VPN)
-4. 단계별 시스템 통합 구동 절차
-5. 통합 검증 및 시나리오 테스트 가이드
-6. 긴급 점검 및 트러블슈팅 체크리스트
+Android의 Kotlin Compose plugin은 2.4.10, Compose BOM은 2026.06.01, CameraX는 1.6.1입니다. [버전 카탈로그](../android/gradle/libs.versions.toml)를 기준으로 하며 Java source/target compatibility 11과 daemon JDK는 별개입니다.
 
----
+## 빌드
 
-## 1. 개발 및 실행 환경 요구사항 (Prerequisites)
+각 절차는 **저장소 루트에서 시작하는 별도 PowerShell 세션** 기준입니다.
 
-시스템 빌드 및 구동을 위해 다음 툴체인과 환경이 준비되어야 합니다.
+### STM32
 
-| 계층 | 개발 툴체인 / IDE | 필수 라이브러리 및 SDK | 대상 하드웨어 / OS |
-| :--- | :--- | :--- | :--- |
-| **Edge Node** | • GNU Arm Embedded Toolchain (`arm-none-eabi-gcc`)<br>• Make / ST-Link CLI (또는 STM32CubeProgrammer) | • CMSIS Core Header (ARM Cortex-M4)<br>• C99 컴파일러 | STM32F411RE Nucleo-64 |
-| **Gateway** | • Qt Creator (또는 MSVC / MinGW / MSYS2 UCRT64)<br>• C++17 지원 컴파일러 | • Qt 5.15+ 또는 Qt 6.x<br>• 필수 모듈: `widgets`, `network`, `serialport`, `charts` | Windows 10 / 11, Linux |
-| **Client** | • Android Studio (Ladybug / Koala 이상)<br>• OpenJDK 17 / 21 | • Android SDK (minSdk 26, compileSdk 34+)<br>• Jetpack Compose, CameraX 1.4+ | Android 8.0 (API 26) 이상 디바이스 |
+[Makefile](../stm32-firmware/Makefile)의 `TOOL_DIR`·`VERSION`을 실제 설치와 맞춥니다.
 
----
+~~~powershell
+arm-none-eabi-gcc --version
+Set-Location stm32-firmware
+mingw32-make all
+~~~
 
-## 2. 계층별 빌드 및 배포 절차
+출력은 `rom_0x08000000.elf/.bin/.map`과 disassembly 파일입니다. 설치 위치가 다르면 `mingw32-make all TOOL_DIR=C:/설치경로 VERSION=15.2.1`로 지정합니다.
 
-### 2.1 STM32 펌웨어 빌드 및 플래싱 (`stm32-firmware/`)
+SWD 연결과 대상 보드를 확인한 뒤 플래싱합니다.
 
-1. **소스 코드 빌드**:
-터미널에서 `stm32-firmware` 디렉터리로 이동 후 `make` 명령어를 실행하여 바이너리를 생성합니다.
-```bash
-cd stm32-firmware
-make clean
-make
-```
+~~~powershell
+STM32_Programmer_CLI.exe -c port=SWD -w ./rom_0x08000000.elf -v -rst -q
+~~~
 
+### Qt
 
-* 빌드 완료 시 `main.elf`, `main.bin`, `main.hex` 파일이 생성됩니다.
+Qt Creator에서 `qt-server/qt-server.pro`를 열고 SerialPort·Charts가 포함된 Kit를 선택합니다. 현재 소스는 Qt 5 스타일 namespace macro를 사용합니다. 명령줄은 MinGW Kit 예시입니다.
 
+~~~powershell
+qmake -v
+New-Item -ItemType Directory -Force qt-server/build | Out-Null
+Set-Location qt-server/build
+qmake ../qt-server.pro
+mingw32-make -j4
+~~~
 
-2. **MCU 플래싱**:
-* **ST-Link 드래그 앤 드롭**: PC에 인식된 `NODE_F411RE` 가상 드라이브에 `main.bin`을 복사합니다.
-* **STM32CubeProgrammer CLI 활용**:
-```bash
-STM32_Programmer_CLI -c port=SWD -w main.bin 0x08000000 -v -rst
-```
+실행 target은 `SmartMonitoringServer`이며 출력 위치는 Kit·configuration에 따라 다릅니다. qmake·compiler·모듈의 Qt major version과 설치 prefix를 맞춥니다.
 
+### Android
 
+Android Studio에서 `android/`를 열어 Gradle Sync를 수행하거나 Wrapper를 사용합니다. SDK 경로는 로컬 환경에 지정하며 `local.properties`는 커밋하지 않습니다.
 
+~~~powershell
+Set-Location android
+.\gradlew.bat --version
+.\gradlew.bat :app:assembleDebug
+~~~
 
+빌드가 성공하면 연결된 디바이스를 확인한 뒤 APK를 설치합니다. 아래 경로는 계속 `android/`에 있는 상태를 기준으로 합니다.
 
----
-
-### 2.2 Qt 관제 서버 빌드 및 실행 (`qt-server/`)
-
-#### [사전 작업] MSYS2 (UCRT64) 환경 필수 모듈 설치
-
-Windows MSYS2 UCRT64 환경에서 Qt5를 사용하는 경우, 시리얼 통신과 차트 렌더링을 위한 추가 모듈을 먼저 설치해야 합니다.
-
-```bash
-# MSYS2 UCRT64 터미널에서 실행
-pacman -S mingw-w64-ucrt-x86_64-qt5-serialport
-pacman -S mingw-w64-ucrt-x86_64-qt5-charts
-```
-
-#### 빌드 및 실행 절차
-
-1. **Qt Creator를 통한 실행 (권장)**:
-* Qt Creator 실행 $\rightarrow$ `qt-server/qt-server.pro` 프로젝트 열기
-* Build Kit(MinGW 또는 MSVC 64-bit) 선택
-* `Ctrl + R` (Run)을 눌러 빌드 및 실행
-
-
-2. **qmake 커맨드라인 빌드 (MSYS2 / MinGW)**:
-```bash
-cd qt-server
-qmake qt-server.pro
-mingw32-make -j4       # Linux의 경우: make -j4
-./release/SmartMonitoringServer.exe
-```
-
-
-
----
-
-### 2.3 Android 모바일 클라이언트 빌드 (`android/`)
-
-1. **Android Studio 실행 및 프로젝트 오픈**:
-* `android/` 디렉터리를 Android Studio에서 열기
-* Gradle Sync 완료 대기
-
-
-2. **APK 빌드 및 설치**:
-* 디버깅 모드가 활성화된 안드로이드 스마트폰을 USB로 연결
-* `Run 'app'` (`Shift + F10`) 실행하여 앱 설치
-* 커맨드라인 빌드:
-```bash
-cd android
-./gradlew assembleDebug
+~~~powershell
+adb devices
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
+~~~
 
+첫 실행 시 카메라 권한을 허용합니다.
 
+## 연결과 구동
 
+1. [핀맵](03_hardware_and_pinmap.md)에 따라 하드웨어·전원을 확인합니다.
+2. Qt에서 실제 VCP 포트를 선택해 **115200bps**로 연결하고 ADC·차트 갱신을 확인합니다.
+3. 임계값·자동 차단·CSV 저장 여부를 정하고 **TCP 서버를 시작**합니다.
+4. Android에 PC의 실제 IP와 port를 입력해 접속합니다. 기본 port는 **8080**입니다.
+5. 영상 전송을 켜고 Qt의 영상과 모바일의 센서값을 확인합니다.
 
+같은 LAN·PC 핫스팟 주소를 사용하거나 Tailscale을 별도로 구성해 VPN 주소로 접속합니다. 앱 기본 IP `192.168.137.1`은 실제 네트워크에 맞게 바꿉니다. 방화벽의 해당 TCP 포트 허용 여부도 확인합니다.
 
----
+Android 수신 timeout은 10초이므로 시리얼 샘플을 먼저 확인하면 센서 데이터 부재와 연결 문제를 구분하기 쉽습니다.
 
-## 3. 네트워크 환경 구성 (Local Hotspot / Tailscale VPN)
+## 설정과 저장 위치
 
-운용 목적에 맞춰 **로컬 핫스팟 모드** 또는 **Tailscale 원격 VPN 모드** 중 하나를 구성합니다.
+| 항목 | 기본값·위치 |
+| --- | --- |
+| 임계값 / 자동 차단 | `3000` / ON |
+| 시리얼 속도 / TCP port | `115200` / `8080` |
+| CSV 저장 | ON, `gas_log_yyyy-MM-dd.csv` |
+| CSV 경로 | `./logs`, 프로세스 작업 디렉터리 기준 |
+| 설정 파일 | `config.ini`, 실행 파일 디렉터리에 종료 시 저장 |
 
-### 3.1 모드 A: Windows 모바일 핫스팟 (로컬 독립망)
+연결은 사용자가 시작합니다. 설정 복원과 로드 보정 규칙은 [Qt 설정](05_qt_control_center.md#설정과-수명)을 참고합니다.
 
-인터넷 연결이 불가능한 독립 현장에서 PC를 Wi-Fi AP로 설정합니다.
+## 시나리오별 검증
 
-1. **Windows 설정**: `설정` $\rightarrow$ `네트워크 및 인터넷` $\rightarrow$ `모바일 핫스팟` 켜기 (대역: 2.4GHz / 5GHz)
-2. **IP 확인**: `ipconfig` 실행 후 모바일 핫스팟 어댑터 IP 확인 (통상 `192.168.137.1`)
-3. **스마트폰 접속**: PC 핫스팟 Wi-Fi에 스마트폰을 연결
+아래는 실행 시 확인할 항목이며 완료된 시험 결과를 뜻하지 않습니다.
 
----
+| 확인 항목 | 조작 | 코드상 기대 동작 |
+| --- | --- | --- |
+| 정상 표시 | 임계값 미만 입력 | 양쪽 센서값·차트·정상 배지 |
+| 자동 차단 | 자동 차단 ON, 래치 해제 상태에서 위험 입력 | 차단 요청, 서보 90° 목표·팬·LED ON |
+| 정상화·복구 | 입력을 낮추고 원격 복구 | 배지는 먼저 정상, 복구 명령 후 0°·팬·LED OFF |
+| 위험 중 복구 | 위험 입력을 유지한 채 원격 복구 | 다음 샘플에서 재차단 가능 |
+| 현장 조작 | PB4·PB5 입력 | MCU 출력 변경, Qt 래치는 별도 유지 |
+| 재부팅·통신 해제 | MCU reset 또는 연결 해제 | 마지막 값·출력·래치와 연결 표시를 따로 확인 |
+| 세션·종료 | 새 클라이언트 접속, 서버·앱 종료 | 연결 교체·자원 해제·이벤트 순서 확인 |
+| 영상 부하 | 영상 ON 상태에서 입력·명령 조작 | 지연·메모리·UI 응답 관찰 |
 
-### 3.2 모드 B: Tailscale 오버레이 VPN (원격 LTE/5G망 - 권장 ⭐)
+입력 변화 → 명령 송신 → PWM 변화 → 실제 구동을 나눠 기록하면 제어 지연의 원인을 구분할 수 있습니다. 측정에는 보드·폰·빌드 버전, 네트워크·부하 조건과 로그·파형을 함께 남깁니다.
 
-스마트폰이 외부 이동통신망(LTE/5G)에 위치한 상태에서 원격 관제할 때 사용합니다.
+## 검증 현황
 
-1. **PC 및 스마트폰에 Tailscale 설치 및 로그인** ([tailscale.com](https://tailscale.com))
-2. **PC Tailscale 가상 IP 확인**: PC 트레이 아이콘에서 `100.72.78.11` (예시) 확인
-3. **스마트폰 Tailscale 활성화**: VPN 연결 스위치 ON (포트포워딩 불필요)
+펌웨어는 Arm GNU 15.2.1과 기존 Makefile로 컴파일·링크·ELF/BIN 생성을 확인했습니다. Qt 재빌드는 로컬 Charts 모듈 부재로 중단됐으며 Android APK 재빌드는 미검증입니다. 장치·UI 사진과 [시연 영상](../images/demo.mp4)은 제공하지만 정량 지연·전원 파형·가스 농도 정확도 측정 자료는 없습니다.
 
----
+## 증상별 확인
 
-## 4. 단계별 시스템 통합 구동 절차
+| 증상 | 확인 위치 |
+| --- | --- |
+| 펌웨어 도구 탐색 실패 | Makefile TOOL_DIR·VERSION |
+| Qt compiler·module 오류 | Kit PATH, qmake와 같은 Qt 버전의 SerialPort·Charts |
+| Gradle 구성 실패 | daemon JDK·SDK·카탈로그·오류 원문 |
+| UART 연결 실패 | 실제 VCP·baud·다른 앱의 점유·USB |
+| TCP 연결 실패 | listen·IP·port·방화벽·VPN |
+| 영상 중 연결 해제 | UART 샘플 부재와 수신 timeout |
+| 영상 색상·배치 이상 | YUV plane stride와 ImageUtils |
+| 정상 배지인데 서보 유지 | 수동 복구 방식과 [상태 모델](01_system_architecture.md#상태-소유권) |
+| 현장 복구 후 재차단 생략 | Qt 래치와 MCU 상태 불일치 |
 
-```text
-[Step 1: 하드웨어 결선] ──> [Step 2: Qt 서버 시작] ──> [Step 3: 시리얼 포트 연결]
-                                                              │
-[Step 5: 실시간 관제]   <── [Step 4: Android 연결 및 스트리밍 시작] ◄┘
-```
-
-1. **하드웨어 전원 및 결선 연결**:
-* STM32 Nucleo 보드를 USB 케이블로 PC에 연결 (가상 COM 포트 및 5V 공급).
-* 서보 모터(PA0), 모터 드라이버(PC0, PC1), 가변저항(PA6), LED(PB0, PB1), 키(PB4, PB5) 결선 상태 확인.
-
-
-2. **Qt 관제 서버 실행 및 TCP 리슨**:
-* `SmartMonitoringServer` 실행
-* 포트 번호 확인 (`8080`) $\rightarrow$ **[서버 시작]** 버튼 클릭 (서버 로그에 포트 개방 메시지 확인)
-
-
-3. **STM32 시리얼 포트 연결**:
-* 포트 목록 콤보박스에서 ST-Link 포트(예: `COM4`) 선택
-* 보드레이트 `115200` 확인 $\rightarrow$ **[시리얼 연결]** 클릭
-* 200ms마다 수신되는 가스 수치가 실시간 차트에 그려지는지 확인
-
-
-4. **Android 앱 실행 및 스트리밍 개시**:
-* 스마트폰에서 앱 실행 (카메라 권한 허용)
-* Server IP에 PC IP(`192.168.137.1` 또는 Tailscale `100.72.78.11`), Port `8080` 입력
-* **[Connect]** 클릭 (우측 상단 배지 `Connected` 전환)
-* **[전송]** 클릭 $\rightarrow$ Qt 관제 화면에 카메라 영상(CCTV) 실시간 렌더링 확인
-
-
-
----
-
-## 5. 통합 검증 및 시나리오 테스트 가이드
-
-### 5.1 시나리오 1: 정상 상태 모니터링 검증
-
-* **동작**: 가변저항을 낮은 수치(~1200)로 유지
-* **검증 항목**:
-* [ ] Qt 실시간 차트 곡선이 파란색으로 안정적으로 갱신되는가?
-* [ ] 상태 배지가 [정상 (초록색)]으로 유지되는가?
-* [ ] Android 앱에 동일한 가스 수치(`GAS:1200:3000`)와 NORMAL 배지가 표시되는가?
-* [ ] 밸브 서보 모터가 0°(개방), DC 팬이 정지 상태를 유지하는가?
-
-
-
----
-
-### 5.2 시나리오 2: 가스 누출 감지 및 자동 차단 연동
-
-* **동작**: 가변저항을 시계 방향으로 돌려 ADC 수치를 **3000 이상**으로 상승시킴
-* **검증 항목**:
-* [ ] Qt 상태 배지가 [위 험 (빨간색)]으로 즉시 전환되는가?
-* [ ] Qt 서버가 STM32로 `'1'`(차단) 명령을 전송하고 로그에 기록되는가?
-* [ ] STM32의 SG90 서보 모터가 90°(차단)로 회전하는가?
-* [ ] **DC 환기 팬이 고속 회전**하고, **차단벽 LED(PB0, PB1)가 점등**하는가?
-* [ ] Android 화면에 DANGER 배지가 점등되고 카메라 영상이 끊김 없이 유지되는가?
-* [ ] `logs/gas_log_YYYY-MM-DD.csv` 파일에 `DANGER` 상태가 Append 기록되는가?
-
-
-
----
-
-### 5.3 시나리오 3: 모바일 원격 수동 복구 제어
-
-* **동작**: 가변저항을 다시 3000 미만으로 낮춘 후, 스마트폰 앱에서 **[밸브 복구]** 버튼 클릭
-* **검증 항목**:
-* [ ] Qt 관제 서버에 `[TCP] 안드로이드 원격 제어: 밸브 복구 요청` 로그가 출력되는가?
-* [ ] STM32로 UART `'0'` 명령이 전송되는가?
-* [ ] 서보 모터가 **0°(개방)** 위치로 원복되고, DC 팬이 정지하며 LED가 소등되는가?
-
-
-
----
-
-### 5.4 시나리오 4: 현장 물리 키(Tact Switch) 인터록 테스트
-
-* **동작**: STM32 보드의 `PB4` 스위치(수동 차단) 및 `PB5` 스위치(수동 복구)를 물리적으로 클릭
-* **검증 항목**:
-* [ ] PB4를 누르면 서버 명령 없이도 현장에서 즉시 밸브 차단, 팬 가동, LED 점등이 실행되는가?
-* [ ] PB5를 누르면 즉시 정상 상태로 복구되는가?
-* [ ] 동일 스위치를 연속으로 눌러도 소프트웨어 인터록에 의해 모터 튐이 발생하지 않는가?
-
-
-
----
-
-## 6. 긴급 점검 및 트러블슈팅 체크리스트
-
-| 이상 현상 | 점검 위치 | 조치 방법 |
-| :--- | :--- | :--- |
-| **`Unknown module(s) in QT: serialport charts`** | MSYS2 환경 / Qt 설치 | • `pacman -S mingw-w64-ucrt-x86_64-qt5-serialport`<br>• `pacman -S mingw-w64-ucrt-x86_64-qt5-charts` 실행 후 qmake 재수행 |
-| **시리얼 연결 실패 / 포트 미인식** | PC 장치 관리자 / USB 케이블 | • ST-Link VCP 드라이버 재설치<br>• 데이터 통신 지원 USB 케이블인지 확인<br>• Qt 콤보박스를 클릭하여 포트 목록 동적 재스캔 |
-| **Android 서버 연결 타임아웃** | 방화벽 / IP 설정 | • Windows 방화벽에서 포트 8080(TCP) 인바운드 허용 규칙 추가<br>• 스마트폰과 PC가 동일 핫스팟에 연결되어 있는지 확인 (또는 Tailscale 활성화 여부 점검) |
-| **서보 모터 각도가 45도만 회전함** | STM32 클럭 설정 | • APB1 타이머 클럭(96MHz) 기준 프리스케일러가 `PSC = 95`로 설정되었는지 확인 (`timer.c`) |
-| **모터 기동 시 가스 수치 급상승** | 전원 및 접지 | • 서보 모터 및 모터 드라이버 전원단에 100uF ~ 470uF 캐패시터 보강<br>• Star Ground 결선 상태 점검 |
+자격 증명·서명 키 관리는 [Credential safety](credential-security.md)를 참고합니다.

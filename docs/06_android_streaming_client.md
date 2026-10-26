@@ -1,324 +1,79 @@
-# Android 모바일 스트리밍 클라이언트 설계서 (Android Streaming Client v1.0)
+# Android 클라이언트
 
-본 문서는 **스마트 가스 모니터링 시스템**의 모바일 영상 및 원격 제어 클라이언트인 Android 애플리케이션(`android/`)의 소프트웨어 아키텍처, CameraX 이미지 처리 파이프라인, 코루틴 기반 비동기 네트워크 엔진, 그리고 Jetpack Compose UI 반응형 상태 관리 구조를 정의합니다.
+[문서 안내](README.md) · [프로토콜](02_protocol_specification.md) · [빌드](08_setup_and_operation_guide.md#android)
 
----
+## 구성과 상태
 
-## 📋 목차
+`MainActivity`에서 `MonitoringScreen`을 표시합니다. 화면은 카메라, 연결, 센서·제어, 로그의 네 영역으로 나뉩니다.
 
-1. 모바일 클라이언트 아키텍처 (MVVM + Jetpack Compose)
-2. CameraX 영상 취득 및 압축 파이프라인 (ImageUtils)
-3. 코루틴 기반 비동기 소켓 엔진 (TcpSocketClient)
-4. 반응형 상태 관리 및 텔레메트리 바인딩 (MonitoringViewModel)
-5. Jetpack Compose 모듈식 UI 설계 (MonitoringScreen)
-6. 실시간 스트리밍 지연(Latency) 최소화 및 자원 최적화 기법
+| 구성 | 책임 |
+| --- | --- |
+| MonitoringScreen | Compose UI, 권한 요청, CameraX 바인딩 |
+| MonitoringViewModel | StateFlow 상태, 센서값 해석, 사용자 동작 조율 |
+| TcpSocketClient | IO 코루틴의 TCP 연결·송수신과 이벤트 |
+| ImageUtils | ImageProxy의 JPEG 변환·회전 보정 |
 
----
-
-## 1. 모바일 클라이언트 아키텍처 (MVVM + Jetpack Compose)
-
-안드로이드 클라이언트는 단방향 데이터 흐름(UDF, Unidirectional Data Flow)을 따르는 **MVVM(Model-View-ViewModel)** 패턴과 선언형 UI 프레임워크인 **Jetpack Compose**를 기반으로 설계되었습니다.
-
-```mermaid
-flowchart TD
-    subgraph "View Layer (UI)"
-        MS["MonitoringScreen\n(Compose Screen)"]
-        PV["PreviewView\n(CameraX Preview)"]
-    end
-
-    subgraph "ViewModel Layer"
-        VM["MonitoringViewModel\n(UI State & Event Coordinator)"]
-    end
-
-    subgraph "Model / Infrastructure Layer"
-        CX["CameraX ImageAnalysis\n(SingleThreadExecutor)"]
-        IU["ImageUtils\n(YUV->NV21->JPEG & Rotate)"]
-        SC["TcpSocketClient\n(Coroutine IO + Mutex)"]
-    end
-
-    MS -- "사용자 인터랙션 (연결, 스트리밍, 밸브 제어)" --> VM
-    VM -- "StateFlow (IP, Port, Status, Gas, Logs)" --> MS
-    CX -- "ImageProxy (YUV_420_888)" --> IU
-    IU -- "ByteArray (JPEG)" --> VM
-    VM -- "sendVideoFrame(ByteArray)" --> SC
-    SC -- "SharedFlow (SocketEvent)" --> VM
-```
-
-### 1.1 주요 컴포넌트 및 계층별 역할
-
-| 컴포넌트 | 계층 | 역할 및 핵심 기능 |
-| :--- | :--- | :--- |
-| **`MonitoringScreen`** | View | • 카메라 프리뷰(Surface), 네트워크 설정, 원격 제어, 시스템 로그 UI 렌더링<br>• Compose 라이프사이클 기반 권한 요청 및 이벤트 바인딩 |
-| **`MonitoringViewModel`** | ViewModel | • `StateFlow`를 통한 UI 상태(연결 상태, 가스 수치, 스트리밍 플래그) 관리<br>• `GAS:val:th` 텔레메트리 파싱 및 소켓 송수신 조율 |
-| **`TcpSocketClient`** | Model (Network) | • `Dispatchers.IO` 코루틴 기반 비동기 TCP 소켓 엔진<br>• `Mutex`를 활용한 바이너리/텍스트 송신 스레드 동기화 및 4바이트 길이 헤더 패킷화 |
-| **`ImageUtils`** | Model (Utility) | • CameraX `ImageProxy` $\rightarrow$ NV21 $\rightarrow$ 회전 보정 JPEG 변환 및 압축 파이프라인 |
-
----
-
-## 2. CameraX 영상 취득 및 압축 파이프라인 (ImageUtils)
-
-실시간 무선 전송을 위해 CameraX의 프레임을 최소 지연 시간으로 압축 및 보정하는 이미지 파이프라인을 구축했습니다.
-
-```mermaid
+~~~mermaid
 flowchart LR
-    A["CameraX Analyzer\n(YUV_420_888)"] --> B["ImageUtils\nNV21 버퍼 재구성\n(Y + V + U Planes)"]
-    B --> C["YuvImage::compressToJpeg\n(Quality: 50)"]
-    C --> D["Matrix Post-Rotate\n(센서 각도 90/270도 보정)"]
-    D --> E["ByteArrayOutputStream\n최종 JPEG 바이너리"]
-```
+    UI["MonitoringScreen"] -->|"사용자 동작"| VM["MonitoringViewModel"]
+    VM -->|"StateFlow"| UI
+    VM -->|"연결 · 명령 · JPEG"| Client["TcpSocketClient"]
+    Client -->|"SharedFlow 이벤트"| VM
+    Camera["CameraX"] --> Image["ImageUtils"]
+    Image -->|"JPEG"| VM
+~~~
 
-### 2.1 ImageProxy to JPEG 변환 구현 (`ImageUtils.kt`)
+IP·port, 연결·전송 상태, 카메라·플래시, 센서값·임계값을 `StateFlow`로 관리합니다. 화면은 `collectAsStateWithLifecycle()`로 구독합니다. 기본 주소는 `192.168.137.1:8080`이며 실제 서버 주소로 바꿔 사용합니다.
 
-```kotlin
-object ImageUtils {
-    fun imageProxyToJpeg(imageProxy: ImageProxy, quality: Int = 50): ByteArray? {
-        if (imageProxy.format != ImageFormat.YUV_420_888) return null
+`GAS:값:임계값` 수신 후 UI에서 위험 여부를 계산합니다. 제어 버튼은 `"1"`·`"0"` 송신을 요청하고 로그를 추가합니다. 로그는 구동 완료 ACK가 아니며, 최근 100개를 메모리에 유지합니다.
 
-        val yBuffer = imageProxy.planes[0].buffer
-        val uBuffer = imageProxy.planes[1].buffer
-        val vBuffer = imageProxy.planes[2].buffer
+<table>
+  <tr><th>카메라·연결</th><th>센서·제어</th></tr>
+  <tr>
+    <td><img src="../images/android_app_camera.png" alt="카메라와 서버 연결 화면" width="220"></td>
+    <td><img src="../images/android_app_control.png" alt="센서값과 차단·복구 제어 화면" width="220"></td>
+  </tr>
+</table>
 
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
+## 카메라에서 화면까지
 
-        // NV21 포맷 버퍼 구성 (Y + V + U)
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        yBuffer.get(nv21, 0, ySize)
-        vBuffer.get(nv21, ySize, vSize)
-        uBuffer.get(nv21, ySize + vSize, uSize)
+| 단계 | 처리 | 실행 맥락 |
+| --- | --- | --- |
+| 카메라 연결 | Preview·ImageAnalysis를 lifecycle에 바인딩 | main executor |
+| 프레임 분석 | 연결·전송 ON일 때 JPEG 변환 | 전용 단일 executor |
+| 송신·수신 | 길이 헤더·JPEG 송신, 센서 줄 수신 | Dispatchers.IO |
+| UI 갱신 | 소켓 이벤트 → ViewModel → 화면 | UI / ViewModel scope |
 
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, imageProxy.width, imageProxy.height, null)
-        val out = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(Rect(0, 0, imageProxy.width, imageProxy.height), quality, out)
-        val imageBytes = out.toByteArray()
+Manifest에 INTERNET·CAMERA 권한을 선언하고 카메라는 런타임 권한을 요청합니다. 4:3 비율을 우선 선택하고 프리뷰는 FIT_CENTER로 표시합니다. 고정 해상도·FPS는 지정하지 않습니다.
 
-        val rotation = imageProxy.imageInfo.rotationDegrees
-        if (rotation == 0) return imageBytes
+카메라·플래시 변경 시 use case를 다시 바인딩합니다. 분석 후 `ImageProxy.close()`를 호출하고, 화면 dispose 시 executor를 shutdown합니다. 프레임 변환의 예외 경로에서 close가 보장되도록 하는 처리는 후속 점검 대상입니다.
 
-        // 센서 회전 각도(90도, 270도) 보정
-        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size) ?: return null
-        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-        val rotatedBitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+### 이미지 변환
 
-        val rotatedOut = ByteArrayOutputStream()
-        rotatedBitmap.compress(Bitmap.CompressFormat.JPEG, quality, rotatedOut)
+현재 경로는 `YUV_420_888 → Y·V·U 버퍼 복사 → NV21 지정 → JPEG 품질 50`입니다. 회전이 필요하면 Bitmap 디코딩·Matrix 회전 후 다시 JPEG로 압축하고 중간 Bitmap을 recycle합니다.
 
-        bitmap.recycle()
-        rotatedBitmap.recycle()
+`rowStride`·`pixelStride`·cropRect를 반영하지 않습니다. YUV_420_888은 여러 plane 배치를 허용하므로 다른 기기에서 색상·행 정렬을 검증해야 합니다. [공식 포맷 정의](https://developer.android.com/reference/android/graphics/ImageFormat#YUV_420_888)
 
-        return rotatedOut.toByteArray()
-    }
-}
-```
+### 최신 프레임 정책
 
-* **압축 품질(Quality 50) 선정**: 화질 저하를 육안으로 체감하기 어려운 수준으로 유지하면서 프레임 크기를 수십 KB 단위로 축소하여 802.11 Wi-Fi 및 Tailscale VPN 환경에서 프레임 레이트를 극대화했습니다.
-* **메모리 누수 방지**: `Bitmap.createBitmap()`으로 생성된 중간 비트맵 객체를 즉시 `recycle()`하여 안드로이드 가비지 컬렉터(GC) 압박을 제거했습니다.
+CameraX의 `KEEP_ONLY_LATEST`는 **분석 단계**의 대기를 제한합니다. [CameraX 분석 정책](https://developer.android.com/media/camera/camerax/analyze)
 
----
+현재 송신은 프레임마다 별도 코루틴으로 요청하므로 느린 네트워크에서는 Mutex 대기 중인 JPEG가 쌓일 수 있습니다. 큐 상한·오래된 프레임 폐기와 명령 우선순위는 다음 개선 과제입니다.
 
-## 3. 코루틴 기반 비동기 소켓 엔진 (TcpSocketClient)
+## 소켓과 수명
 
-`TcpSocketClient`는 UI 메인 스레드를 차단하지 않고 I/O 전용 코루틴(`Dispatchers.IO`) 풀에서 동작합니다.
+`connect()`는 기존 연결을 정리하고 Socket을 생성합니다. 연결 timeout은 5초, 수신 timeout은 10초입니다. 연결 후 수신 코루틴이 줄 단위 메시지를 읽습니다.
 
-### 3.1 4바이트 Big-Endian 길이 헤더 패킷화 (`sendRaw`)
+`sendRaw()`는 4바이트 길이와 JPEG를, `sendText()`는 명령 한 줄을 씁니다. 두 함수가 같은 Mutex를 사용해 영상 헤더·본문과 명령의 바이트 혼합을 막습니다. 이 Mutex는 연결·해제와 멤버 교체 전체를 보호하는 lock은 아닙니다.
 
-```kotlin
-class TcpSocketClient(private val scope: CoroutineScope) {
-    private var outputStream: OutputStream? = null
-    private val sendMutex = Mutex() // 송신 스레드 안전성 보장 락
+연결 정리는 receive job cancel → Socket close → stream 참조 해제 순서입니다. ViewModel의 `onCleared()`도 disconnect를 요청합니다. scope 취소와 종료 이벤트의 겹침, 빠른 재연결은 자원 수명 검증이 필요합니다.
 
-    fun sendRaw(data: ByteArray) {
-        scope.launch(Dispatchers.IO) {
-            sendMutex.withLock {
-                try {
-                    outputStream?.let { os ->
-                        val size = data.size
-                        // 4바이트 Big-Endian 페이로드 길이 헤더 생성
-                        os.write(
-                            byteArrayOf(
-                                (size ushr 24).toByte(),
-                                (size ushr 16).toByte(),
-                                (size ushr 8).toByte(),
-                                size.toByte()
-                            )
-                        )
-                        os.write(data)
-                        os.flush()
-                    }
-                } catch (_: Exception) {
-                    // 고빈도 스트리밍 패킷 에러는 채널 혼잡 방지를 위해 무시
-                }
-            }
-        }
-    }
+Qt의 센서 전송이 멈추면 영상 송신 중에도 읽기 timeout이 발생할 수 있습니다. 연결 해제 이벤트는 연결·전송 상태를 내리며 마지막 센서값은 유지합니다.
 
-    fun sendText(text: String) {
-        scope.launch(Dispatchers.IO) {
-            sendMutex.withLock {
-                try {
-                    writer?.println(text) // '1\n' 또는 '0\n'
-                } catch (e: Exception) {
-                    _events.emit(SocketEvent.Error("명령 전송 실패: ${e.message}"))
-                }
-            }
-        }
-    }
-}
-```
+## 코드와 빌드
 
-* **스레드 안전성(`Mutex`)**: 카메라 프레임 분석 스레드와 사용자의 밸브 제어 클릭 이벤트가 동시에 소켓 출력 스트림에 접근하더라도 패킷이 깨지지 않도록 `Mutex.withLock` 동기화를 적용했습니다.
+- [화면](../android/app/src/main/java/com/hocheol/smartmonitoringsystem/ui/MonitoringScreen.kt) · [ViewModel](../android/app/src/main/java/com/hocheol/smartmonitoringsystem/ui/MonitoringViewModel.kt)
+- [소켓](../android/app/src/main/java/com/hocheol/smartmonitoringsystem/network/TcpSocketClient.kt) · [이미지 변환](../android/app/src/main/java/com/hocheol/smartmonitoringsystem/util/ImageUtils.kt)
+- [app 설정](../android/app/build.gradle.kts) · [버전 카탈로그](../android/gradle/libs.versions.toml)
 
----
-
-## 4. 반응형 상태 관리 및 텔레메트리 바인딩 (MonitoringViewModel)
-
-### 4.1 UI 상태 구조 및 초기값
-
-* **기본 접속 IP**: `100.72.78.11` (Tailscale VPN 사설망 IP 지원)
-* **기본 포트**: `8080`
-* **기본 임계값**: `3000`
-
-```kotlin
-class MonitoringViewModel : ViewModel() {
-    private val _ip = MutableStateFlow("100.72.78.11")
-    val ip = _ip.asStateFlow()
-
-    private val _isConnected = MutableStateFlow(false)
-    val isConnected = _isConnected.asStateFlow()
-
-    private val _isStreaming = MutableStateFlow(false)
-    val isStreaming = _isStreaming.asStateFlow()
-
-    private val _gasValue = MutableStateFlow(0)
-    val gasValue = _gasValue.asStateFlow()
-
-    private val _threshold = MutableStateFlow(3000)
-    val threshold = _threshold.asStateFlow()
-
-    private val _logs = MutableStateFlow<List<String>>(emptyList())
-    val logs = _logs.asStateFlow()
-    
-    // ...
-}
-```
-
-### 4.2 실시간 가스 텔레메트리 파싱
-
-Qt 관제 서버에서 매 200ms마다 브로드캐스트하는 `GAS:<val>:<throll>` 메시지를 파싱하여 UI 상태로 바인딩합니다.
-
-```kotlin
-private fun observeSocketEvents() {
-    viewModelScope.launch {
-        socketClient.events.collect { event ->
-            when (event) {
-                is SocketEvent.Connected -> {
-                    _isConnected.value = true
-                    addLog("서버 연결 성공 (${event.ip}:${event.port})")
-                }
-                is SocketEvent.Disconnected -> {
-                    _isConnected.value = false
-                    _isStreaming.value = false
-                    addLog(event.message ?: "서버 연결 해제됨")
-                }
-                is SocketEvent.MessageReceived -> {
-                    val text = event.text.trim()
-                    if (text.startsWith("GAS:")) {
-                        val parts = text.split(":")
-                        if (parts.size >= 3) {
-                            _gasValue.value = parts[1].toIntOrNull() ?: _gasValue.value
-                            _threshold.value = parts[2].toIntOrNull() ?: _threshold.value
-                        }
-                    } else {
-                        addLog("수신: $text")
-                    }
-                }
-                is SocketEvent.Error -> addLog("오류: ${event.message}")
-            }
-        }
-    }
-}
-```
-
----
-
-## 5. Jetpack Compose 모듈식 UI 설계 (MonitoringScreen)
-
-화면은 유지보수성과 재사용성을 위해 4개의 독립 섹션 컴포저블로 모듈화되었습니다.
-
-```text
-+-------------------------------------------------------------+
-| TopAppBar: Smart Monitoring Shield        [ Connected 배지 ] |
-+-------------------------------------------------------------+
-|                                                             |
-| [ CameraSection ]                                           |
-| +---------------------------------------------------------+ |
-| | PreviewView (3:4 비율 전/후면 카메라 프리뷰)  [ LIVE 배지 ] | |
-| +---------------------------------------------------------+ |
-| [ 전송/중지 버튼 ]     [ 카메라 전환 버튼 ]    [ 플래시 토글 ]|
-|                                                             |
-| [ ConnectionSection ]                                       |
-| Server IP: [ 100.72.78.11 ]   Port: [ 8080 ]  [ Disconnect ]|
-|                                                             |
-| [ GasControlSection ]                                       |
-| Gas Level: 1270                Status: [ NORMAL / DANGER ]  |
-| [ 밸브 차단 ('1') ]             [ 밸브 복구 ('0') ]           |
-|                                                             |
-| [ LogSection ]                                              |
-| +---------------------------------------------------------+ |
-| | [12:30:15] 서버 연결 성공 (100.72.78.11:8080)            | |
-| | [12:30:16] 비디오 스트리밍 시작                            | |
-| +---------------------------------------------------------+ |
-+-------------------------------------------------------------+
-```
-
-<div align="center">
-  <table style="width: 100%; border: none;">
-    <tr>
-      <td align="center" width="50%">
-        <img src="../images/android_app_camera.png" width="80%" alt="CameraX 실시간 프리뷰 및 네트워크" /><br>
-        <b>📹 [상단부] CameraX 영상 송출 및 Tailscale VPN 연결</b>
-      </td>
-      <td align="center" width="50%">
-        <img src="../images/android_app_control.png" width="80%" alt="가스 제어 및 시스템 로그" /><br>
-        <b>🎛️ [하단부] 실시간 가스 텔레메트리, 원격 밸브 제어 및 로그</b>
-      </td>
-    </tr>
-  </table>
-  <p><b>[그림] Jetpack Compose 기반 Android 단일 화면 UI 분할 구성</b></p>
-</div>
-
-1. **`CameraSection`**: CameraX `PreviewView`를 `AndroidView`로 래핑하여 3:4 화면 비율 유지 및 LIVE 상태 칩 표시.
-2. **`ConnectionSection`**: 서버 IP/Port 입력 및 단일 토글 연결 버튼.
-3. **`GasControlSection`**: 실시간 가스 농도 수치 및 DANGER/NORMAL 동적 색상 배지, 원격 밸브 차단/복구 제어 버튼.
-4. **`LogSection`**: `logs.asReversed()` 기반 최근 100개 슬라이딩 이벤트 로그 출력 창.
-
----
-
-## 6. 실시간 스트리밍 지연(Latency) 최소화 및 자원 최적화 기법
-
-### 6.1 최신 프레임 킵 전략 (`STRATEGY_KEEP_ONLY_LATEST`)
-
-무선 네트워크 지연(Jitter) 발생 시 큐에 쌓인 이전 프레임을 전송하느라 영상 지연이 누적되는 현상을 방지하기 위해 CameraX 배압 전략(Backpressure Strategy)을 적용했습니다.
-
-```kotlin
-val imageAnalysis = ImageAnalysis.Builder()
-    .setResolutionSelector(resolutionSelector)
-    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-    .build()
-```
-
-* **동작 방식**: 이미지 분석기가 이전 프레임을 처리 중일 때 들어오는 새로운 프레임은 버퍼에 쌓지 않고 즉시 드롭하여, 항상 **최신 시점의 프레임만 네트워크로 송출**합니다.
-
-### 6.2 전용 단일 스레드 풀 격리
-
-카메라 프레임 인코딩 작업이 UI 렌더링 스레드에 간섭하지 않도록 전용 `SingleThreadExecutor`를 할당하고 컴포저블 라이프사이클 종료(`onDispose`) 시 안전하게 해제합니다.
-
-```kotlin
-val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-DisposableEffect(Unit) {
-    onDispose {
-        cameraExecutor.shutdown() // 컴포저블 파괴 시 스레드 풀 안전 종료
-    }
-}
-```
+minSdk는 26, compileSdk·targetSdk는 37, CameraX는 1.6.1입니다. 전체 도구 버전과 APK 생성 절차는 [실행 가이드](08_setup_and_operation_guide.md#android)를 참고합니다.

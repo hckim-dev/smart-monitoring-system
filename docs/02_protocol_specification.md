@@ -1,239 +1,150 @@
-# 통신 프로토콜 명세서 (Protocol Specification v1.0)
+# 통신 프로토콜
 
-본 문서는 **스마트 가스 모니터링 시스템**을 구성하는 3계층(STM32 펌웨어, Qt 데스크톱 관제 서버, Android 모바일 클라이언트) 간의 물리/전송 계층 사양, 패킷 포맷, 프레이밍(Framing) 기법 및 데이터 흐름을 정의합니다.
+[문서 안내](README.md) · [시스템 상태](01_system_architecture.md#상태-소유권)
 
----
+이 문서는 현재 송신기와 수신기가 사용하는 형식을 정의합니다. `\r`은 CR(`0x0D`), `\n`은 LF(`0x0A`)를 뜻합니다.
 
-## 1. 통신 토폴로지 개요
+## 경로 요약
 
-시스템은 이종(Heterogeneous) 통신 매체를 사용하며, **Qt 데스크톱 서버가 중앙 게이트웨이(Gateway)** 역할을 수행하여 시리얼 패킷과 TCP 네트워크 패킷을 상호 중계합니다.
-
-```mermaid
-flowchart LR
-    STM32["STM32F411RE\n(엣지 노드)"] -- "UART (115200 8N1)\n가스 ADC / 액추에이터 제어" --> QtServer["Qt Control Center\n(게이트웨이 / 관제 서버)"]
-    QtServer -- "TCP/IP (Port 8080)\n가스 텔레메트리 브로드캐스트" --> Android["Android Client\n(모바일 앱)"]
-    Android -- "TCP/IP (Port 8080)\nJPEG 비디오 프레임 / 원격 제어" --> QtServer
-```
-
----
-
-## 2. UART 시리얼 프로토콜 (STM32 ↔ Qt 서버)
-
-STM32 MCU와 Qt 관제 서버 간의 유선 통신 규약입니다. 12비트 센서 원시 데이터 전송 및 하드웨어 액추에이터 제어 명령을 담당합니다.
-
-### 2.1 물리 계층 사양 (Physical Layer)
-
-| 항목 | 사양 |
-| --- | --- |
-| **통신 방식** | USB Virtual COM Port (FTDI / ST-Link VCP) |
-| **MCU 핀 맵** | `PA2` (USART2_TX), `PA3` (USART2_RX) |
-| **Baud Rate** | 115200 bps |
-| **Data Bits** | 8 Bits |
-| **Parity** | None |
-| **Stop Bits** | 1 Bit |
-| **Flow Control** | None |
-
----
-
-### 2.2 상향 패킷: 가스 센서 텔레메트리 (STM32 → Qt 서버)
-
-STM32에서 계측된 12비트 가스 센서 ADC 값을 개행 문자(`\n`)로 구분된 ASCII 문자열 형태로 주기적(100ms) 전송합니다.
-
-* **전송 주기**: 100ms
-* **포맷**: `<ADC_VALUE>\n`
-* **유효 데이터 범위**: `0` ~ `4095` (12-bit ADC)
-
-```text
-[Packet Format]
-+---------------------------------+------+
-|  ASCII Decimal Value (1~4 Bytes)| 0x0A |
-+---------------------------------+------+
-```
-
-**전송 예시:**
-
-```text
-1270\n    --> 정상 상태 계측값 (ADC: 1270)
-3150\n    --> 임계값 초과 위험 계측값 (ADC: 3150)
-```
-
----
-
-### 2.3 하향 패킷: 액추에이터 통합 제어 (Qt 서버 → STM32)
-
-관제 서버가 위험 임계값 초과를 감지(자동)하거나 사용자가 수동 버튼을 클릭했을 때 STM32로 전송하는 1바이트 제어 문자입니다.
-
-| 명령 문자 | Hex Code | 액추에이터 동작 상태 | 비고 |
-| :---: | :---: | :--- | :--- |
-| `'1'` | `0x31` | **위험 차단 상태**<br>• 서보 모터: 90° (물리 밸브 차단)<br>• DC 모터: ON (환기 팬 가동)<br>• LED: ON (경보 표시) | 단일 트리거 래치 적용 |
-| `'0'` | `0x30` | **정상 복구 상태**<br>• 서보 모터: 0° (물리 밸브 개방)<br>• DC 모터: OFF (환기 팬 정지)<br>• LED: OFF (경보 해제) | 소프트웨어 인터록 적용 |
-
----
-
-## 3. TCP 네트워크 프로토콜 (Qt 서버 ↔ Android 클라이언트)
-
-Qt 데스크톱 서버와 Android 모바일 앱 간의 무선 네트워크 프로토콜입니다. 단일 TCP 소켓 세션에서 **가변 길이 바이너리 영상 스트림**, **텍스트 제어 명령**, **실시간 센서 텔레메트리**를 멀티플렉싱(Multiplexing)하여 처리합니다.
-
-### 3.1 네트워크 계층 사양
-
-| 항목 | 사양 |
-| :--- | :--- |
-| **전송 계층 프로토콜** | TCP/IP |
-| **서버 바인딩 주소** | `QHostAddress::AnyIPv4` (0.0.0.0) |
-| **기본 서비스 포트** | `8080` (사용자 정의 변경 가능) |
-| **네트워크 모드** | • **Local LAN**: Windows 모바일 핫스팟 (`192.168.137.1`)<br>• **Remote VPN**: Tailscale Mesh Network (`100.72.78.11`) |
-| **연결 타임아웃** | 5000ms |
-
----
-
-### 3.2 상향 패킷 A: 카메라 영상 스트리밍 (Android → Qt 서버)
-
-CameraX로부터 캡처된 프레임을 YUV_420_888에서 NV21을 거쳐 JPEG로 압축한 후, 4바이트 길이 헤더(Length-Prefixed Framing)를 결합하여 바이너리로 전송합니다.
-
-```text
-[Binary Video Frame Packet Layout]
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                 Payload Length (32-bit Big-Endian)            |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-|                       JPEG Binary Payload                     |
-|                      (Variable: N Bytes)                      |
-|                                                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-```
-
-* **Header (4 Bytes)**: JPEG 페이로드의 전체 바이트 크기 (`uint32_t`, Big-Endian)
-* **Payload (N Bytes)**: 실제 압축된 JPEG 이미지 바이너리 데이터
-* **압축 파라미터**: JPEG Quality 50, 4:3 Aspect Ratio (최신 프레임 우선 드롭 전략)
-
----
-
-### 3.3 상향 패킷 B: 모바일 원격 밸브 제어 (Android → Qt 서버)
-
-모바일 앱 사용자가 화면의 밸브 차단/복구 버튼을 터치했을 때 전송되는 제어 문자열입니다.
-
-| 명령 문자열 | Hex Representation | 처리 동작 |
+| 방향 | 매체 | 메시지 |
 | --- | --- | --- |
-| `"1\n"` 또는 `'1'` | `0x31 (0x0A)` | Qt 서버가 수신 후 STM32로 밸브 차단 명령 중계 |
-| `"0\n"` 또는 `'0'` | `0x30 (0x0A)` | Qt 서버가 수신 후 STM32로 밸브 복구 명령 중계 |
+| STM32 → Qt | UART | ADC 정수 + CRLF |
+| Qt → STM32 | UART | 차단 `0x31` / 복구 `0x30` |
+| Android → Qt | TCP | 4바이트 길이 + JPEG 또는 명령 + LF |
+| Qt → Android | TCP | `GAS:<ADC>:<THRESHOLD>\n` |
 
-> **💡 패킷 식별 매커니즘 (Server Demultiplexing):**
-> Qt 서버(`TcpStreamServer`)는 수신 버퍼의 첫 번째 바이트가 `0x00`이 아니면서 `'1'` 또는 `'0'`인 경우 텍스트 제어 명령으로 우선 분기 처리하고, 첫 4바이트가 Big-Endian 길이 헤더 형태인 경우 영상 스트림 파서로 라우팅합니다.
+MCU와 Android 사이의 제어·계측 중계는 Qt에서 이루어집니다. 영상은 Android에서 Qt로만 전송합니다.
 
----
+## UART
 
-### 3.4 하향 패킷: 가스 텔레메트리 중계 (Qt 서버 → Android)
+### 연결 설정
 
-Qt 서버가 STM32로부터 수신한 실시간 가스 수치와 현재 설정된 위험 임계값을 모바일 클라이언트로 실시간 브로드캐스트합니다.
+| 항목 | 설정 |
+| --- | --- |
+| MCU 주변장치 | USART2 |
+| 핀 | PA2 TX / PA3 RX, AF7 |
+| 통신 | 115200bps, 8 data bits, no parity, 1 stop bit, no flow control |
+| PC 연결 | 시연 장치의 ST-LINK Virtual COM Port |
+| MCU 기준 클럭 | PCLK1 48MHz |
 
-* **포맷**: `GAS:<ADC_VALUE>:<THRESHOLD>\n`
-* **구분자**: 콜론(`:`) 및 개행(`\n`)
+Qt에서 다른 baud rate를 선택할 수 있지만 현재 MCU는 `115200`으로 초기화합니다. 양쪽 설정을 맞춰야 합니다.
 
-**전송 예시:**
+### ADC 전송
 
-```text
-GAS:1270:3000\n    --> 현재 가스값 1270, 임계값 3000 (정상)
-GAS:3420:3000\n    --> 현재 가스값 3420, 임계값 3000 (위험 상태)
-```
+MCU는 200ms 간격으로 `printf("%d\n", adc_val)`을 호출합니다. `syscalls.c`의 송신 함수가 LF 앞에 CR을 추가하므로 선로상의 예시는 다음과 같습니다.
 
----
+~~~text
+표현: 1265\r\n
+Hex:  31 32 36 35 0D 0A
+~~~
 
-## 4. 전체 시나리오별 통신 시퀀스 다이어그램
+Qt는 `canReadLine()`이 참일 때만 줄을 읽고 `trimmed()`를 적용합니다. 숫자 변환 성공과 `0 <= ADC <= 4095`를 모두 만족한 줄만 `dataReceived(int)`로 전달합니다. 따라서 부팅 메시지와 빈 줄은 센서값으로 처리되지 않습니다.
 
-### 4.1 가스 계측 및 실시간 모바일 모니터링 (정상 상태)
+이 검증은 형식·범위 검증입니다. 범위 안의 잘못된 값이나 측정 노이즈를 검출하는 CRC·통계 필터는 없습니다.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant STM as STM32 (Edge)
-    participant QT as Qt Control Center
-    participant APP as Android Client
+### 제어
 
-    APP->>QT: TCP Connect (Port 8080)
-    QT-->>APP: Connection Accepted (Client Count: 1)
-    
-    loop 100ms 주기 계측
-        STM->>QT: UART "1265\n"
-        QT->>QT: 라인 파싱 (ADC: 1265 < 3000)
-        QT->>QT: 실시간 차트 슬라이딩 윈도우 업데이트
-        QT->>APP: TCP "GAS:1265:3000\n"
-        APP->>APP: UI 상태 갱신 (NORMAL 배지)
-    end
+| ASCII | Hex | MCU 출력 목표 |
+| --- | --- | --- |
+| `'1'` | `31` | 서보 90°, 팬 ON, LED ON |
+| `'0'` | `30` | 서보 0°, 팬 OFF, LED OFF |
 
-    loop 영상 스트리밍 활성화 시
-        APP->>QT: TCP [4B Length][JPEG Binary]
-        QT->>QT: 버퍼 조립 및 QPixmap 디코딩
-        QT->>QT: CCTV 화면 렌더링
-    end
-```
+Qt의 `sendChar()`는 개행 없이 1바이트를 씁니다. MCU ISR은 받은 바이트를 공유 슬롯에 저장하고, 메인 루프는 `'1'`·`'0'`만 해석합니다.
 
----
+ACK, 상태 응답, 순번, 재전송은 없습니다. 수신 슬롯은 FIFO가 아니므로 연속 명령을 모두 보존하지 않습니다. ISR의 갱신과 메인 루프의 flag 해제 사이에 새 명령이 도착하면 처리 기회를 잃을 수도 있습니다.
 
-### 4.2 가스 누출 감지 및 자동 밸브 차단 (위험 상태)
+## TCP
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant STM as STM32 (Edge)
-    participant QT as Qt Control Center
-    participant APP as Android Client
+### 세션
 
-    STM->>QT: UART "3250\n" (임계값 3000 초과)
-    QT->>QT: 위험 상태 판정 (DANGER)
-    QT->>QT: CSV 로그 영속화 (DANGER 기록)
-    
-    par 밸브 차단 제어
-        QT->>STM: UART '1' (밸브 차단 명령 전송)
-        STM->>STM: 인터록 확인 (Servo 90도 / Fan ON / LED ON)
-    and 모바일 위험 알림 전송
-        QT->>APP: TCP "GAS:3250:3000\n"
-        APP->>APP: UI 위험 알림 표시 (DANGER 빨간색 전환)
-    end
-```
+| 항목 | 설정 |
+| --- | --- |
+| 서버 | Qt `QTcpServer` |
+| 바인딩 | `QHostAddress::AnyIPv4` |
+| 기본 포트 | `8080`, Qt UI에서 변경 가능 |
+| 클라이언트 | Android `Socket` |
+| 연결 timeout | 5000ms |
+| Android 수신 timeout | 10000ms |
+| 동시 연결 | 한 개 유지, 새 연결 시 기존 연결 교체 |
 
----
+Android 기본 IP는 `192.168.137.1`입니다. 고정 탐색이나 Tailscale API 연동은 없으며 사용자가 실제 서버 주소를 입력합니다.
 
-### 4.3 모바일 앱을 통한 원격 수동 복구 제어
+### Android → Qt: JPEG
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant APP as Android Client
-    participant QT as Qt Control Center
-    participant STM as STM32 (Edge)
+~~~text
+offset  size       내용
+0       4 bytes    JPEG 바이트 수 N, Big-Endian
+4       N bytes    JPEG 본문
+~~~
 
-    Note over APP: 관제자가 현장 영상 확인 후 복구 결정
-    APP->>QT: TCP "0\n" (밸브 복구 요청)
-    QT->>QT: 원격 명령 로그 출력 ("안드로이드 원격 제어: 밸브 복구")
-    QT->>STM: UART '0' (복구 명령 전송)
-    STM->>STM: Servo 0도 (밸브 개방) / Fan OFF / LED OFF
-```
+길이 `1000`의 헤더는 `00 00 03 E8`입니다. Android는 `ByteArray.size`를 4바이트로 나눠 쓰고, Qt는 `qint32`로 읽어 `1 <= N <= 10 * 1024 * 1024` 범위를 허용합니다. 허용 범위의 길이는 모두 최상위 바이트가 `0x00`입니다.
 
----
+JPEG 품질 인자는 기본 `50`이며 CameraX는 4:3 비율을 우선 선택합니다. 고정 해상도나 전송 FPS는 지정하지 않습니다.
 
-## 5. 예외 처리 및 방어적 설계 (Defensive Design)
+### Android → Qt: 제어 명령
 
-### 5.1 TCP 패킷 단편화(Fragmentation) 대응
+~~~text
+차단: "1\n"  → 31 0A
+복구: "0\n"  → 30 0A
+~~~
 
-네트워크 지연이나 MTU 분할로 인해 영상 프레임이 여러 조각으로 나뉘어 수신되는 현상을 방지하기 위해, Qt 서버는 내부 `QByteArray m_buffer`를 유지합니다. 수신된 바이트가 헤더에 명시된 `m_imageSize`에 도달할 때까지 파싱을 대기하며 프레임 경계를 안전하게 복원합니다.
+Android `sendText()`는 `PrintWriter.println()`을 사용합니다. Qt는 줄을 trim한 뒤 정확히 `"1"` 또는 `"0"`일 때만 명령 signal을 발생시킵니다.
 
-### 5.2 비정상 패킷 방어 (Oversized Packet Protection)
+Qt에는 수신 버퍼가 정확히 1바이트인 `'1'`·`'0'`도 즉시 처리하는 보조 경로가 있습니다. 개행 없는 명령을 여러 개 붙이거나 영상과 합쳐 보내는 일반 형식은 정의하지 않습니다. 현재 Android처럼 개행으로 끝내야 합니다.
 
-잘못된 데이터 수신으로 인한 메모리 고갈을 방지하기 위해, 파싱된 헤더 크기가 비정상적인 경우 버퍼를 강제 리셋합니다.
+### Qt → Android: 텔레메트리
 
-```cpp
-// 비정상 패킷 크기 방어 로직 (0 이하 또는 10MB 초과)
-if (m_imageSize <= 0 || m_imageSize > 10 * 1024 * 1024) {
-    emit logMessage("비정상 패킷 감지. 버퍼를 초기화합니다.");
-    m_buffer.clear();
-    m_imageSize = 0;
-    return;
-}
-```
+~~~text
+GAS:1265:3000\n
+~~~
 
-### 5.3 시리얼 노이즈 및 결측 데이터 필터링
+| 필드 | 의미 |
+| --- | --- |
+| `GAS` | 메시지 식별자 |
+| `1265` | ADC 원시값 |
+| `3000` | Qt의 현재 임계값 |
 
-UART 라인에 글리치(Glitch) 노이즈가 유입될 경우를 대비하여, 파싱 결과가 숫자인지 확인하고 12비트 유효 범위(`0 <= ADC <= 4095`) 내의 데이터만 UI 및 판정 로직으로 전달합니다.
+Qt는 유효한 UART 샘플을 받을 때 연결된 클라이언트에 전송합니다. 연결 직후나 임계값 변경 직후에 별도 상태 snapshot을 보내지 않습니다. 변경된 임계값도 다음 센서 샘플에서 전달됩니다.
+
+Android는 `readLine()`으로 수신한 문자열을 `:`로 분리합니다. 필드가 3개 이상이면 앞의 두 수치 필드를 정수로 변환하고, 변환 실패 시 기존 값을 유지합니다. 별도의 범위 검증은 없습니다.
+
+## 수신 버퍼와 메시지 경계
+
+TCP는 메시지 경계를 보존하지 않습니다. Qt의 `m_buffer`와 `m_imageSize`는 다음 상태로 동작합니다.
+
+~~~mermaid
+flowchart TD
+    Read["readAll 결과를 버퍼에 추가"] --> Start{"JPEG 본문 대기 중인가?"}
+    Start -->|아니오| Kind{"첫 바이트가 0인가?"}
+    Kind -->|아니오| Text["LF까지 명령 처리 · 미완성 줄 대기<br/>단일 바이트 명령은 보조 경로로 처리"]
+    Kind -->|예| Header["4바이트 헤더 대기 · 길이 검사"]
+    Header --> Body["N바이트 본문 대기"]
+    Start -->|예| Body
+    Body --> Decode["JPEG 디코딩 · 표시 signal"]
+    Decode --> Next{"남은 데이터가 있는가?"}
+    Text --> Next
+    Next -->|예| Start
+~~~
+
+- 헤더가 4바이트 미만이면 다음 수신을 기다립니다.
+- 본문이 N바이트 미만이면 크기 상태를 유지합니다.
+- 한 번에 여러 프레임이 도착하면 반복문으로 계속 처리합니다.
+- 본문 수신 중에는 JPEG 내부의 LF나 `'1'`을 명령으로 해석하지 않습니다.
+- 길이가 0 이하 또는 10MiB 초과이면 현재 버퍼와 길이 상태를 초기화합니다.
+- JPEG 디코딩에 실패한 프레임은 표시하지 않고 다음 메시지로 진행합니다.
+
+길이 제한이 전체 수신 버퍼의 상한을 뜻하지는 않습니다. LF 없는 텍스트 입력의 누적 제한, 본문 완성 timeout, 오류 후 명확한 재동기화 식별자는 없습니다.
+
+## 송신 순서와 보장 범위
+
+Android의 `sendRaw()`와 `sendText()`는 같은 `Mutex`를 사용합니다. 정상적인 송신에서 JPEG의 헤더·본문 사이로 텍스트가 끼어드는 것을 막습니다. 프레임 송신 완료까지 제어 명령이 기다릴 수 있으며, 제어 명령 우선 큐는 없습니다.
+
+Qt `QSerialPort::write()`와 `QTcpSocket::write()`는 송신 데이터를 버퍼에 맡깁니다. 현재 `sendChar()`는 반환값이 `-1`이 아닌지 확인하며, 수신측 처리 완료는 확인하지 않습니다. Android의 명령 송신 로그 역시 구동 완료 ACK가 아닙니다.
+
+## 소스 안내
+
+| 역할 | 파일 |
+| --- | --- |
+| UART 출력과 수신 | [syscalls.c](../stm32-firmware/syscalls.c), [uart.c](../stm32-firmware/uart.c), [isr.c](../stm32-firmware/isr.c) |
+| Qt 송수신 | [serialmanager.cpp](../qt-server/serialmanager.cpp), [tcpstreamserver.cpp](../qt-server/tcpstreamserver.cpp) |
+| Android 송수신 | [TcpSocketClient.kt](../android/app/src/main/java/com/hocheol/smartmonitoringsystem/network/TcpSocketClient.kt), [MonitoringViewModel.kt](../android/app/src/main/java/com/hocheol/smartmonitoringsystem/ui/MonitoringViewModel.kt) |
